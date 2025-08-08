@@ -3,7 +3,7 @@ import { google } from "googleapis";
 const SPREADSHEET_ID = "1lvYp0VK_xAdqG7gMovJHdaVs5Rz2Grl-3I1_7e6yL5g";
 const SHEET_NAME = "Sheet1"; // <-- AJUSTA al nombre exacto de tu pestaña
 const IDENTIFIER_PRIORITY = ["ID", "Placa", "Cedula"]; // orden de búsqueda
-const TARGET_HEADER = "Si/No";
+const TARGET_HEADER = "Si/No"; // columna donde va SI/NO
 
 function columnNumberToLetter(n) {
   let s = "";
@@ -38,6 +38,47 @@ function redirectOk() {
   return { statusCode: 302, headers: { Location: "/gracias.html" } };
 }
 
+// Formulario para pedir motivo cuando el status es "rechazado" y no se ha enviado "motivo"
+function renderMotivoForm({ id }) {
+  const safeId = String(id || "");
+  const html = `<!doctype html>
+<html lang="es"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Cuéntanos el motivo</title>
+<style>
+  body{font-family:Arial,system-ui,-apple-system;background:#fafafa;margin:0}
+  .wrap{max-width:680px;margin:48px auto;padding:0 16px}
+  .card{background:#fff;border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,.08);padding:28px 24px}
+  h1{margin:0 0 8px}
+  p{color:#333;margin:0 0 18px}
+  label{font-weight:700}
+  textarea{width:100%;min-height:120px;padding:10px;border-radius:10px;border:1px solid #ddd;font-family:inherit}
+  button{padding:12px 16px;border-radius:10px;border:0;cursor:pointer}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>😕 Entendido, ¿nos cuentas por qué?</h1>
+      <p>Tu respuesta nos ayuda a mejorar el servicio.</p>
+      <form action="/.netlify/functions/respuesta" method="GET" style="display:grid;gap:12px;">
+        <input type="hidden" name="id" value="${safeId}"/>
+        <input type="hidden" name="status" value="rechazado"/>
+        <label for="motivo">Motivo</label>
+        <textarea id="motivo" name="motivo" required maxlength="500" placeholder="Escribe el motivo..."></textarea>
+        <button type="submit">Enviar</button>
+      </form>
+    </div>
+  </div>
+</body></html>`;
+  return {
+    statusCode: 200,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+    body: html
+  };
+}
+
 export const handler = async (event) => {
   const debug = (event.queryStringParameters || {}).debug === "1";
   const out = { ok: false, step: "start", details: {} };
@@ -46,7 +87,8 @@ export const handler = async (event) => {
     const qs = event.queryStringParameters || {};
     const status = qs.status;
     const id = qs.id;
-    out.details.qs = qs;
+    const motivo = (qs.motivo || "").toString().trim();
+    out.details.qs = { ...qs, motivo_len: motivo.length };
 
     if (!id || !status) {
       out.error = "Missing id or status";
@@ -64,6 +106,11 @@ export const handler = async (event) => {
       return debug
         ? { statusCode: 400, body: JSON.stringify(out) }
         : { statusCode: 400, body: "Invalid status. Use confirmado|rechazado." };
+    }
+
+    // Si dijo NO y aún no existe "motivo", renderizar formulario
+    if (writeValue === "NO" && !motivo) {
+      return renderMotivoForm({ id });
     }
 
     out.step = "auth";
@@ -87,6 +134,7 @@ export const handler = async (event) => {
     const headers = rows[0].map((h) => (h || "").toString().trim());
     out.details.headers = headers;
 
+    // Encontrar columna Si/No
     const targetColIndex = headers.findIndex(
       (h) => h.toLowerCase() === TARGET_HEADER.toLowerCase()
     );
@@ -111,7 +159,7 @@ export const handler = async (event) => {
       return debug ? { statusCode: 200, body: JSON.stringify(out) } : redirectOk();
     }
 
-    // buscar fila
+    // buscar fila correspondiente al identificador
     const idTarget = String(id).trim().toUpperCase();
     let foundRowNumber = -1;
     for (let r = 1; r < rows.length; r++) {
@@ -126,7 +174,7 @@ export const handler = async (event) => {
       return debug ? { statusCode: 200, body: JSON.stringify(out) } : redirectOk();
     }
 
-    // actualizar celda
+    // Escribir SI/NO
     const colLetter = columnNumberToLetter(targetColIndex + 1);
     const cellRange = `${SHEET_NAME}!${colLetter}${foundRowNumber}`;
     out.details.cellRange = cellRange;
@@ -143,16 +191,39 @@ export const handler = async (event) => {
       requestBody: { values: [[writeValue]] }
     });
 
-    out.ok = true; out.step = "updated"; out.details.writeValue = writeValue;
+    // ---- Motivo SIEMPRE en columna N ----
+    let wroteMotivo = false;
+    if (writeValue === "NO" && motivo) {
+      const motivoRange = `${SHEET_NAME}!N${foundRowNumber}`; // N fija
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: motivoRange,
+        valueInputOption: "RAW",
+        requestBody: { values: [[motivo]] }
+      });
+      wroteMotivo = true;
+      out.details.motivoRange = motivoRange;
+    }
 
-    return debug
-      ? { statusCode: 200, body: JSON.stringify(out) }
-      : redirectOk();
+    out.ok = true;
+    out.step = "updated";
+    out.details.writeValue = writeValue;
+    out.details.wroteMotivo = wroteMotivo;
+
+    if (debug) {
+      return { statusCode: 200, body: JSON.stringify(out) };
+    }
+
+    // Redirigir a gracias; si hubo motivo, agregar m=1
+    return {
+      statusCode: 302,
+      headers: { Location: wroteMotivo ? "/gracias.html?m=1" : "/gracias.html" }
+    };
 
   } catch (err) {
-    out.error = String(err?.message || err);
+    const errorOut = { ok: false, step: "catch", error: String(err?.message || err) };
     return debug
-      ? { statusCode: 500, body: JSON.stringify(out) }
+      ? { statusCode: 500, body: JSON.stringify(errorOut) }
       : redirectOk();
   }
 };

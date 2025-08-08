@@ -4,9 +4,29 @@
   <meta charset="UTF-8" />
   <title>Gracias</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{color-scheme:light dark}
+    body{font-family:Arial,system-ui,-apple-system; text-align:center; padding:48px 16px; background:#fafafa; margin:0}
+    .card{max-width:560px;margin:0 auto;background:#fff;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.08);padding:32px}
+    h1{margin:0 0 12px}
+    p{margin:0 0 8px;color:#333}
+    .sub{color:#666;font-size:14px}
+  </style>
 </head>
-<body style="font-family: Arial; text-align:center; padding:48px 16px;">
-  <h1>✅ ¡Gracias por tu respuesta!</h1>
-  <p>Hemos registrado tu decisión sobre la póliza.</p>
+<body>
+  <div class="card">
+    <h1 id="title">✅ ¡Gracias por tu respuesta!</h1>
+    <p id="msg">Hemos registrado tu decisión sobre la póliza.</p>
+    <p class="sub">Puedes cerrar esta ventana con tranquilidad.</p>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const withMotivo = params.get('m') === '1';
+    if (withMotivo) {
+      document.getElementById('title').textContent = '🙏 ¡Gracias por contarnos el motivo!';
+      document.getElementById('msg').textContent = 'Registramos tu decisión y el motivo en nuestro sistema.';
+    }
+  </script>
 </body>
 </html>
