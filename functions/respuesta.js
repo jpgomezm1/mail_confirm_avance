@@ -1,13 +1,8 @@
 import { google } from "googleapis";
 
 const SPREADSHEET_ID = "1ywAiS_kSzjFC_2N3oN9bKjPhRxJr-UKmLHi8Mec9ZcM";
-// Cambia el nombre de la hoja si no es la primera:
-const SHEET_NAME = "Hoja 1"; // <--- AJUSTA esto al nombre real de tu pestaña en Sheets
-
-// En orden de prioridad qué columna usar para identificar al asegurado:
-const IDENTIFIER_PRIORITY = ["ID", "Placa", "Cedula"];
-
-// Valor exacto de la columna de destino:
+const SHEET_NAME = "Sheet1"; // <-- AJUSTA al nombre exacto de tu pestaña
+const IDENTIFIER_PRIORITY = ["ID", "Placa", "Cedula"]; // orden de búsqueda
 const TARGET_HEADER = "Si/No";
 
 function columnNumberToLetter(n) {
@@ -21,49 +16,60 @@ function columnNumberToLetter(n) {
 }
 
 function decodeServiceAccount() {
-  // Opción recomendada: variable de entorno con el JSON en base64
   const b64 = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON_B64;
-  if (!b64) {
-    throw new Error("Falta GOOGLE_APPLICATION_CREDENTIALS_JSON_B64 en variables de entorno.");
-  }
+  if (!b64) throw new Error("Falta GOOGLE_APPLICATION_CREDENTIALS_JSON_B64");
   const json = Buffer.from(b64, "base64").toString("utf-8");
   const creds = JSON.parse(json);
-
-  // Ajuste necesario por saltos de línea en la private_key
   creds.private_key = creds.private_key.replace(/\\n/g, "\n");
   return creds;
 }
 
 async function getSheetsClient() {
   const creds = decodeServiceAccount();
-
   const jwt = new google.auth.JWT({
     email: creds.client_email,
     key: creds.private_key,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"]
   });
+  return google.sheets({ version: "v4", auth: jwt });
+}
 
-  const sheets = google.sheets({ version: "v4", auth: jwt });
-  return sheets;
+function redirectOk() {
+  return { statusCode: 302, headers: { Location: "/gracias.html" } };
 }
 
 export const handler = async (event) => {
+  const debug = (event.queryStringParameters || {}).debug === "1";
+  const out = { ok: false, step: "start", details: {} };
+
   try {
-    const { status, id } = event.queryStringParameters || {};
+    const qs = event.queryStringParameters || {};
+    const status = qs.status;
+    const id = qs.id;
+    out.details.qs = qs;
+
     if (!id || !status) {
-      return { statusCode: 400, body: "Missing id or status." };
+      out.error = "Missing id or status";
+      return debug
+        ? { statusCode: 400, body: JSON.stringify(out) }
+        : { statusCode: 400, body: "Missing id or status." };
     }
 
-    // Normalizar estado → SI / NO
     const normalized = String(status).toLowerCase();
     let writeValue = "";
     if (normalized === "confirmado") writeValue = "SI";
     else if (normalized === "rechazado") writeValue = "NO";
-    else return { statusCode: 400, body: "Invalid status. Use confirmado|rechazado." };
+    else {
+      out.error = "Invalid status";
+      return debug
+        ? { statusCode: 400, body: JSON.stringify(out) }
+        : { statusCode: 400, body: "Invalid status. Use confirmado|rechazado." };
+    }
 
+    out.step = "auth";
     const sheets = await getSheetsClient();
 
-    // Traer toda la hoja
+    out.step = "get_values";
     const rangeAll = `${SHEET_NAME}!A:Z`;
     const resp = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
@@ -71,52 +77,64 @@ export const handler = async (event) => {
     });
 
     const rows = resp.data.values || [];
+    out.details.rows_len = rows.length;
+
     if (rows.length === 0) {
-      console.warn("La hoja está vacía");
-      return redirectOk(); // Redirigimos igual para no romper la UX del usuario
+      out.error = "Empty sheet";
+      return debug ? { statusCode: 200, body: JSON.stringify(out) } : redirectOk();
     }
 
     const headers = rows[0].map((h) => (h || "").toString().trim());
-    const targetColIndex = headers.findIndex((h) => h.toLowerCase() === TARGET_HEADER.toLowerCase());
+    out.details.headers = headers;
+
+    const targetColIndex = headers.findIndex(
+      (h) => h.toLowerCase() === TARGET_HEADER.toLowerCase()
+    );
+    out.details.targetColIndex = targetColIndex;
+
     if (targetColIndex === -1) {
-      console.error(`No se encontró la columna '${TARGET_HEADER}' en los headers:`, headers);
-      return redirectOk();
+      out.error = `Target header '${TARGET_HEADER}' not found`;
+      return debug ? { statusCode: 200, body: JSON.stringify(out) } : redirectOk();
     }
 
-    // Buscar columna de identificador
-    let idColIndex = -1;
+    // elegir columna identificadora
+    let idColIndex = -1, usedIdHeader = null;
     for (const key of IDENTIFIER_PRIORITY) {
       const idx = headers.findIndex((h) => h.toLowerCase() === key.toLowerCase());
-      if (idx !== -1) {
-        idColIndex = idx;
-        break;
-      }
+      if (idx !== -1) { idColIndex = idx; usedIdHeader = key; break; }
     }
+    out.details.idColIndex = idColIndex;
+    out.details.usedIdHeader = usedIdHeader;
+
     if (idColIndex === -1) {
-      console.error(`No se encontró ninguna de las columnas identificadoras: ${IDENTIFIER_PRIORITY.join(", ")}`);
-      return redirectOk();
+      out.error = `No identifier column found (tried: ${IDENTIFIER_PRIORITY.join(", ")})`;
+      return debug ? { statusCode: 200, body: JSON.stringify(out) } : redirectOk();
     }
 
-    // Buscar la fila cuyo identificador coincide
+    // buscar fila
     const idTarget = String(id).trim().toUpperCase();
-    let foundRowNumber = -1; // 1-based (incluye header), luego lo convertimos
+    let foundRowNumber = -1;
     for (let r = 1; r < rows.length; r++) {
       const row = rows[r] || [];
       const cell = (row[idColIndex] || "").toString().trim().toUpperCase();
-      if (cell === idTarget) {
-        foundRowNumber = r + 1; // porque headers es fila 1
-        break;
-      }
+      if (cell === idTarget) { foundRowNumber = r + 1; break; }
     }
+    out.details.foundRowNumber = foundRowNumber;
 
     if (foundRowNumber === -1) {
-      console.warn(`No se encontró fila con ID='${idTarget}'`);
-      return redirectOk();
+      out.error = `Row not found for id='${idTarget}'`;
+      return debug ? { statusCode: 200, body: JSON.stringify(out) } : redirectOk();
     }
 
-    // Construir rango exacto de la celda a actualizar (columna "Si/No" en la fila encontrada)
+    // actualizar celda
     const colLetter = columnNumberToLetter(targetColIndex + 1);
     const cellRange = `${SHEET_NAME}!${colLetter}${foundRowNumber}`;
+    out.details.cellRange = cellRange;
+
+    if (debug && qs.dryrun === "1") {
+      out.ok = true; out.step = "dryrun"; out.details.writeValue = writeValue;
+      return { statusCode: 200, body: JSON.stringify(out) };
+    }
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
@@ -125,17 +143,16 @@ export const handler = async (event) => {
       requestBody: { values: [[writeValue]] }
     });
 
-    return redirectOk();
+    out.ok = true; out.step = "updated"; out.details.writeValue = writeValue;
+
+    return debug
+      ? { statusCode: 200, body: JSON.stringify(out) }
+      : redirectOk();
+
   } catch (err) {
-    console.error(err);
-    // Igual redirigimos a “gracias” para no exponer errores al usuario final.
-    return redirectOk();
+    out.error = String(err?.message || err);
+    return debug
+      ? { statusCode: 500, body: JSON.stringify(out) }
+      : redirectOk();
   }
 };
-
-function redirectOk() {
-  return {
-    statusCode: 302,
-    headers: { Location: "/gracias.html" }
-  };
-}
